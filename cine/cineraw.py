@@ -12,10 +12,12 @@ Options:
 -d --display                show a preview
 -s --start_frame FRAME      start from FRAME [default: 1]
 -c --count COUNT            [default: 1]
---fieldnames                print all fieldnames
--h --help                   print this help message
+--fieldnames                print(all fieldnames)
+-h --help                   print(this help message)
 
 """
+
+from __future__ import print_function,division,absolute_import
 import os
 import struct
 
@@ -24,7 +26,7 @@ import numpy as np
 from docopt import docopt
 
 import cine
-from linLUT import linLUT
+import linLUT
 
 
 def read_header(myfile):
@@ -47,7 +49,7 @@ def read_header(myfile):
     return header
 
 
-def frame_reader(myfile, header, start_frame=1, count=None):
+def frame_reader(myfile, header, start_frame=1, count=None, step=1):
     frame = start_frame
     if not count:
         count = header['cinefileheader'].ImageCount
@@ -55,13 +57,13 @@ def frame_reader(myfile, header, start_frame=1, count=None):
     with open(myfile, 'rb') as f:
         while count:
             frame_index = frame - 1
-            print "Reading frame {}".format(frame)
+            print("Reading frame {}".format(frame))
 
             f.seek(header['pImage'][frame_index])
 
             AnnotationSize = struct.unpack('I', f.read(4))[0]
             Annotation = struct.unpack('{}B'.format(AnnotationSize - 8),
-                                       f.read((AnnotationSize - 8) / 8))
+                                       f.read((AnnotationSize - 8) // 8))
             header["Annotation"] = Annotation
 
             ImageSize = struct.unpack('I', f.read(4))[0]
@@ -71,7 +73,7 @@ def frame_reader(myfile, header, start_frame=1, count=None):
             raw_image = create_raw_array(data, header)
 
             yield raw_image
-            frame += 1
+            frame += step
             count -= 1
 
 
@@ -101,21 +103,22 @@ def unpack_10bit(data, width, height):
 
 def create_raw_array(data, header):
     width, height = header['bitmapinfoheader'].biWidth, header['bitmapinfoheader'].biHeight
-    BayerPatterns = {3: 'gbrg', 4: 'rggb'}
-    pattern = BayerPatterns[header['setup'].CFA]
+    BayerPatterns = {0: None, 3: 'gbrg', 4: 'rggb'}
+    setup_ = header['setup']
+    pattern = BayerPatterns[setup.CFA]
 
     if header['bitmapinfoheader'].biCompression:
         raw_image = unpack_10bit(data, width, height)
-        fix_bad_pixels(raw_image, header['setup'].WhiteLevel, pattern)
-        raw_image = linLUT[raw_image].astype(np.uint16)
+        fix_bad_pixels(raw_image, setup_.WhiteLevel, pattern)
+        raw_image = linLUT.linLUT.astype(np.uint16)[raw_image]
         raw_image = np.interp(raw_image, [64, 4064], [0, 2**12-1]).astype(np.uint16)
     else:
         raw_image = np.frombuffer(data, dtype='uint16')
         raw_image.shape = (height, width)
-        fix_bad_pixels(raw_image, header['setup'].WhiteLevel, pattern)
+        fix_bad_pixels(raw_image, setup_.WhiteLevel, pattern)
         raw_image = np.flipud(raw_image)
-        raw_image = np.interp(raw_image, [header['setup'].BlackLevel, header['setup'].WhiteLevel],
-                                         [0, 2**header['setup'].RealBPP-1]).astype(np.uint16)
+        raw_image = np.interp(raw_image, [setup_.BlackLevel, setup_.WhiteLevel],
+                              [0, 2 ** setup_.RealBPP - 1]).astype(np.uint16)
 
     return raw_image
 
@@ -124,30 +127,52 @@ def fix_bad_pixels(raw_image, white_level, pattern):
     hot = np.where(raw_image > white_level)
     coordinates = zip(hot[0], hot[1])
 
-    masked_image = np.ma.MaskedArray(raw_image)
-
-    for color in 'rgb':
-        # FIXME: reuse those masks for whitebalancing
-        mask = gen_mask(pattern, color, raw_image)
-        masked_image.mask = mask
-        smooth = cv2.medianBlur(masked_image, ksize=3)
-
+    if pattern is None:
+        # Gray scale, use simpler algorithm
+        # (median of non-hot pixels in 3x3 neighborhood)
+        # Fails for hot regions larger than 3x3
         for coord in coordinates:
-            if not mask[coord]:
-                print 'fixing {} in color {}'.format(coord, color)
-                raw_image[coord] = smooth[coord]
+            localpix = raw_image[coord[0]-1:coord[0]+2,
+                                coord[1]-1:coord[1]+2].ravel()
+            localpix = localpix[np.where(localpix <= white_level)]
+            rawimage[coord[0],coord[1]] = np.median(localpix)
+    else:
+        masked_image = np.ma.MaskedArray(raw_image)
 
-        print 'done color', color
+        for color in 'rgb':
+            # FIXME: reuse those masks for whitebalancing
+            mask = gen_mask(pattern, color, raw_image)
+            masked_image.mask = mask
+            smooth = cv2.medianBlur(masked_image, ksize=3)
 
-    masked_image.mask = np.ma.nomask
+            for coord in coordinates:
+                if not mask[coord]:
+                    print('fixing {} in color {}'.format(coord, color))
+                    raw_image[coord] = smooth[coord]
+
+            print('done color', color)
+
+        masked_image.mask = np.ma.nomask
 
 
 def color_pipeline(raw, setup, bpp=12):
     """Order from:
     http://www.visionresearch.com/phantomzone/viewtopic.php?f=20&t=572#p3884
     """
+
+    # For grayscale, use the fllowing pipeline
+    if 0 == setup.CFA:
+        # convert to float
+        image = raw.astype(np.float32) / (2**bpp-1)
+        if setup.fOffset != 0:
+            image += setup.fOffset
+        if setup.fGain != 1.0:
+            image *= setup.fGain
+        image = apply_gamma(image, setup)
+        return image
+
     # 1. Offset the raw image by the amount in flare
-    print "fFlare: ", setup.fFlare
+    print("fFlare: ", setup.fFlare)
 
     # 2. White balance the raw picture using the white balance component of cmatrix
     BayerPatterns = {3: 'gbrg', 4: 'rggb'}
@@ -180,9 +205,9 @@ def color_pipeline(raw, setup, bpp=12):
     ccm2[1][1] = 1 - ccm2[1][0] - ccm2[1][2]
     ccm2[2][2] = 1 - ccm2[2][0] - ccm2[2][1]
 
-    print "cmCalib", cmCalib
-    print "ccm: ", ccm
-    print "ccm2", ccm2
+    print("cmCalib", cmCalib)
+    print("ccm: ", ccm)
+    print("ccm2", ccm2)
 
     rgb_image = np.dot(rgb_image, ccm.T)
 
@@ -191,32 +216,32 @@ def color_pipeline(raw, setup, bpp=12):
     rgb_image = np.dot(rgb_image, cmUser.T)
 
     # 6. Offset the image by the amount in offset
-    print "fOffset: ", setup.fOffset
+    print("fOffset: ", setup.fOffset)
 
     # 7. Apply the global gain
-    print "fGain: ", setup.fGain
+    print("fGain: ", setup.fGain)
 
     # 8. Apply the per-component gains red, green, blue
-    print "fGainR, fGainG, fGainB: ", setup.fGainR, setup.fGainG, setup.fGainB
+    print("fGainR, fGainG, fGainB: ", setup.fGainR, setup.fGainG, setup.fGainB)
 
     # 9. Apply the gamma curves; the green channel uses gamma, red uses gamma + rgamma and blue uses gamma + bgamma
-    print "fGamma, fGammaR, fGammaB: ", setup.fGamma, setup.fGammaR, setup.fGammaB
+    print("fGamma, fGammaR, fGammaB: ", setup.fGamma, setup.fGammaR, setup.fGammaB)
     rgb_image = apply_gamma(rgb_image, setup)
 
     # 10. Apply the tone curve to each of the red, green, blue channels
     fTone = np.asarray(setup.fTone)
-    print setup.ToneLabel, setup.TonePoints, fTone
+    print(setup.ToneLabel, setup.TonePoints, fTone)
 
     # 11. Add the pedestals to each color channel, and linearly rescale to keep the white point the same.
-    print "fPedestalR, fPedestalG, fPedestalB: ", setup.fPedestalR, setup.fPedestalG, setup.fPedestalB
+    print("fPedestalR, fPedestalG, fPedestalB: ", setup.fPedestalR, setup.fPedestalG, setup.fPedestalB)
 
     # 12. Convert to YCrCb using REC709 coefficients
 
     # 13. Scale the Cr and Cb components by chroma.
-    print "fChroma: ", setup.fChroma
+    print("fChroma: ", setup.fChroma)
 
     # 14. Rotate the Cr and Cb components around the origin in the CrCb plane by hue degrees.
-    print "fHue: ", setup.fHue
+    print("fHue: ", setup.fHue)
 
     return rgb_image
 
@@ -225,15 +250,15 @@ def whitebalance_raw(raw, setup, pattern):
     cmCalib = np.asarray(setup.cmCalib).reshape(3, 3)
     whitebalance = np.diag(cmCalib)
 
-    print "WBGain: ", np.asarray(setup.WBGain)
-    print "WBView: ", np.asarray(setup.WBView)
-    print "fWBTemp: ", setup.fWBTemp
-    print "fWBCc: ", setup.fWBCc
-    print "cmCalib: ", cmCalib
-    print "whitebalance: ", whitebalance
+    print("WBGain: ", np.asarray(setup.WBGain))
+    print("WBView: ", np.asarray(setup.WBView))
+    print("fWBTemp: ", setup.fWBTemp)
+    print("fWBCc: ", setup.fWBCc)
+    print("cmCalib: ", cmCalib)
+    print("whitebalance: ", whitebalance)
 
     # FIXME: maybe use .copy()
-    wb_raw = np.ma.MaskedArray(raw)
+    wb_raw = np.ma.MaskedArray(raw).astype(np.float16)
 
     wb_raw.mask = gen_mask(pattern, 'r', wb_raw)
     wb_raw *= whitebalance[0]
@@ -246,14 +271,13 @@ def whitebalance_raw(raw, setup, pattern):
 
     return wb_raw
 
-
 def gen_mask(pattern, c, image):
     def color_kern(pattern, c):
         return np.array([[pattern[0] != c, pattern[1] != c],
                          [pattern[2] != c, pattern[3] != c]])
 
     (h, w) = image.shape[:2]
-    cells = np.ones((h/2, w/2))
+    cells = np.ones((h//2, w//2))
 
     return np.kron(cells, color_kern(pattern, c))
 
@@ -277,8 +301,12 @@ def resize(rgb_image, new_width):
 
 
 def display(image_8bit):
-    cv2.imshow('image', image_8bit)
-    cv2.waitKey(0)
+    if (image_8bit.dtype.itemsize != 8 and
+                not issubclass(image_8bit.dtype.type, np.inexact) ):
+        cv2.imshow('image',image_8bit/float(image_8bit.max()))
+    else:
+        cv2.imshow('image', image_8bit)
+    cv2.waitKey(1)
     cv2.destroyAllWindows()
 
 
@@ -301,7 +329,7 @@ if __name__ == '__main__':
     if args['--fieldnames']:
         for field_name, field_type in setup._fields_:
             attr = getattr(setup, field_name)
-        print field_name, np.asarray(attr)
+        print(field_name, np.asarray(attr))
 
     for i, rgb_image in enumerate(rgb_images):
         frame = start_frame + i
@@ -318,7 +346,7 @@ if __name__ == '__main__':
             name = os.path.splitext(os.path.basename(args['CINEFILE']))[0]
             outname = '{}-{:06d}.{}'.format(name, frame, ending)
             outfile = os.path.join(args['--outdir'], outname)
-            print "Writing File {}".format(outname)
+            print("Writing File {}".format(outname))
             save(rgb_image, outfile)
 
         if args['--display']:
