@@ -12,16 +12,13 @@ from __future__ import (absolute_import, division, print_function,
 
 from pims.frame import Frame
 from pims.base_frames import FramesSequence, index_attr
-from pims.utils.misc import FileLocker
-import os, struct, itertools
-from warnings import warn
+import os, struct
 import datetime
 import numpy as np
-from threading import Lock
 import pytz
 
-import cine
-import linLUT
+from . import cine
+from . import linLUT
 
 __all__ = ['CineSequence']
 
@@ -42,8 +39,13 @@ class CineSequence(FramesSequence):
 
 
     def __init__(self, filename, process_func=None, dtype=None,
-                 calibrated = True):
+                 calibrated = True, tzinfo=False):
         super(CineSequence, self).__init__()
+        # tzinfo can be None if you want naive times,
+        # or you can arbitrarily set it,
+        # otherwise it takes the timezone from the header
+        if tzinfo is not False:
+            self.tzinfo = tzinfo
         self._verbose = False
         self._file = open(filename, 'rb')
         self._filename = filename
@@ -57,6 +59,7 @@ class CineSequence(FramesSequence):
 
         if 'frametime' in self._header:
             self._frametime = self._header['frametime']
+        if 'frametime_float' in self._header:
             self._frametime_float = self._header['frametime_float']
         if 'exposure' in self._header:
             self._exposure = self._header['exposure']
@@ -78,6 +81,17 @@ class CineSequence(FramesSequence):
         else:
             self._dtype = self._dtype_native
 
+        # These keys are from Norpix.  There may be more that are expected
+        self.metadata = {
+            'width': self._width,
+            'height':self._height,
+            'bit_depth_real': self._bpp, # Real bit depth before compression
+            # 'description': ''
+            # 'origin': None, # How is this described?  This is not 'which corner is 0'
+            'suggested_frame_rate': self._setup.FrameRate
+        }
+
+
     def _read_header(self):
         with open(self._filename, 'rb') as f:
             f.seek(0)
@@ -90,14 +104,8 @@ class CineSequence(FramesSequence):
             f.readinto(header['setup'])
             imagecount = header['cinefileheader'].ImageCount
 
-            # FIXME: a cmeara set for UTC has a
-            # RecordingTimeZone = -7200 .  Why?
-            # if header['setup'].RecordingTimeZone == 0:
-            #     tzinfo = pytz.UTC
-            # else:
-            #     tzinfo = pytz.FixedOffset(
-            #         -header['setup'].RecordingTimeZone // 60)
-            tzinfo = pytz.UTC
+            if not hasattr(self, 'tzinfo'):
+                self.tzinfo = pytz.UTC
             f.seek(header['cinefileheader'].OffSetup +
                    header['setup'].Length)
             endofsetup = f.tell()
@@ -120,10 +128,12 @@ class CineSequence(FramesSequence):
 
                     header['frametime_float'] = np.array([
                         t64*tscale for t64 in t64s])
-                    header['frametime'] = [
-                        datetime.datetime.fromtimestamp(ts,
-                                                        tz=tzinfo)
-                        for ts in header['frametime_float']]
+                    # This is the slowest part of opening megaframe files,
+                    # so don't convert from flow until requested
+                    # header['frametime'] = [
+                    #     datetime.datetime.fromtimestamp(ts,
+                    #                                     tz=self.tzinfo)
+                    #     for ts in header['frametime_float']]
                 elif blocktype == 1003:
                     # Exposure time block
                     exposures = struct.unpack('{}I'.format(imagecount),
@@ -151,11 +161,15 @@ class CineSequence(FramesSequence):
         if i >= self._image_count or i < 0:
             raise ValueError("Frame number is out of range: " + str(i))
 
+    def _timefromfloat(self, time_float):
+        return datetime.datetime.fromtimestamp(
+                    time_float, tz=self.tzinfo)
+
     def get_frame(self, i):
         self._verify_frame_no(i)
         self._file.seek(self._pImage[i])
-        metadata = {'time':self._frametime[i],
-                    'time_float':self._frametime_float[i]}
+        metadata = {'time':self.get_time(i),
+                    'time_float':self.get_time_float(i)}
         try:
             metadata['exposure'] = self._exposure[i]
         except:
@@ -385,12 +399,13 @@ class CineSequence(FramesSequence):
         """Return the time of frame i as a datetime instance.
 
         """
-        return self._frametime[i]
+        return datetime.datetime.fromtimestamp(
+                self._frametime_float[i], tz=self.tzinfo)
 
     @index_attr
     def get_time_float(self, i):
         """Return the time of frame i as a floating-point number of seconds."""
-        return self.self._frametime_float[i]
+        return self._frametime_float[i]
 
     def dump_times_float(self):
         """Return all frame times in file, as an array of floating-point numbers."""
