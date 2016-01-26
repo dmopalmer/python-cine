@@ -1,6 +1,11 @@
 python-cine
 ===========
 
+This branch of cbenhagen/python-cine is completely reworked to be a pims object.
+
+Unfortunately, the two projects have incompatible licesnes, and so this branch
+may not be redistributed.
+
 Reading Vision Research cine files with python
 
 ## Requirements
