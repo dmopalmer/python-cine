@@ -3,8 +3,10 @@ python-cine
 
 This branch of cbenhagen/python-cine is completely reworked to be a pims object.
 
-Unfortunately, the two projects have incompatible licesnes, and so this branch
+Unfortunately, the two projects have incompatible licenses, and so this branch
 may not be redistributed.
+
+There is a cine reader already in PIMS which may suit most purposes.
 
 Reading Vision Research cine files with python
 
