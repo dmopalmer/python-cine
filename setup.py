@@ -5,7 +5,7 @@ except ImportError:
 
 setup(
         name='python-cine',
-        version='0.2',
+        version='0.2.1',
         packages=['cine'],
         url='',
         license='GPL3',

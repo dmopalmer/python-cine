@@ -150,9 +150,15 @@ class CineSequence(FramesSequence):
             # header_length = ctypes.sizeof(header['cinefileheader'])
             # bitmapinfo_length = ctypes.sizeof(header['bitmapinfoheader'])
 
-            f.seek(header['cinefileheader'].OffImageOffsets)
+            try:    # This runs into trouble on SAMBA
+                f.seek(header['cinefileheader'].OffImageOffsets)
+                pImage_raw = f.read(imagecount * 8)
+            except:
+                print("Failed to read {} image pointers. Retrying".format(imagecount))
+                f.seek(header['cinefileheader'].OffImageOffsets)
+                pImage_raw = f.read(imagecount * 8)
             header['pImage'] = struct.unpack('{}q'.format(imagecount),
-                                             f.read(imagecount * 8))
+                                             pImage_raw)
         return header
 
     def _verify_frame_no(self, i):
